@@ -5,6 +5,20 @@ import { homedir } from 'os';
 
 const packageJson = await Bun.file(join(import.meta.dir, '../package.json')).json();
 
+// Private Types
+type AddPathConfig = {
+  agentName: string;
+  basePath?: string;
+  usePersonalClaude?: boolean;
+};
+
+type ImportPathConfig = {
+  sourcePath: string;
+  filename: string;
+  toClaudeProject?: boolean;
+  toClaudePersonal?: boolean;
+  basePath?: string;
+};
 
 // File System Utilities
 async function copyFile(sourcePath: string, targetPath: string): Promise<void> {
@@ -107,6 +121,44 @@ function getRepoPaths(repoName: string, basePath?: string) {
   };
 }
 
+function getAddPathsWithConfig(config: AddPathConfig) {
+  const buddyPath = getBuddyBasePath(config.basePath);
+  const localAgentsPath = join(buddyPath, 'agents', 'local');
+  const claudeSourcePath = config.usePersonalClaude
+    ? join(homedir(), '.claude', 'agents', `${config.agentName}.md`)
+    : join(process.cwd(), '.claude', 'agents', `${config.agentName}.md`);
+  const buddyDestPath = join(localAgentsPath, `${config.agentName}.md`);
+
+  return {
+    localAgentsPath,
+    sourcePath: claudeSourcePath,
+    destPath: buddyDestPath
+  };
+}
+
+function getImportPathsWithConfig(config: ImportPathConfig) {
+  const buddyPath = getBuddyBasePath(config.basePath);
+  const buddySourcePath = join(buddyPath, 'agents', `${config.sourcePath}.md`);
+
+  const destPath = config.toClaudePersonal
+    ? join(homedir(), '.claude', 'agents', `${config.filename}.md`)
+    : config.toClaudeProject
+    ? join(process.cwd(), '.claude', 'agents', `${config.filename}.md`)
+    : join(process.cwd(), `${config.filename}.md`);
+
+  const destLocation = config.toClaudePersonal 
+    ? '~/.claude/agents/' 
+    : config.toClaudeProject 
+    ? '.claude/agents/' 
+    : 'current directory';
+
+  return {
+    sourcePath: buddySourcePath,
+    destPath,
+    destLocation
+  };
+}
+
 program
   .name('buddy')
   .description('Manage git-hosted subagents')
@@ -125,6 +177,7 @@ program
   .description('Add agents')
   .argument('[source]', 'URL, filename, or agent name')
   .option('-p, --claude-project <name>', 'Copy from .claude/agents/')
+  .option('-c, --claude-personal <name>', 'Copy from ~/.claude/agents/')
   .action(async (source: string | undefined, options) => {
     await addCommand(source, options);
   });
@@ -134,6 +187,7 @@ program
   .description('Import agents')
   .argument('<source>', 'Source in format local/agentname')
   .option('-p, --claude-project', 'Import to .claude/agents/')
+  .option('-c, --claude-personal', 'Import to ~/.claude/agents/')
   .option('--force', 'Skip README check')
   .action(async (source: string, options) => {
     await importCommand(source, options);
@@ -158,10 +212,15 @@ async function initCommand(pathname?: string): Promise<void> {
   }
 }
 
-async function addCommand(source: string | undefined, options: { claudeProject?: string }): Promise<void> {
+async function addCommand(source: string | undefined, options: { claudeProject?: string; claudePersonal?: string }): Promise<void> {
   // If source is provided and it's a URL, ignore flags and process as URL
   if (source && isUrl(source)) {
     await addFromUrl(source);
+    return;
+  }
+
+  if (options.claudePersonal) {
+    await addClaudePersonalAgent(options.claudePersonal);
     return;
   }
 
@@ -265,7 +324,35 @@ async function addClaudeProjectAgent(agentName: string): Promise<void> {
   }
 }
 
-async function importCommand(source: string, options: { claudeProject?: boolean; force?: boolean }): Promise<void> {
+async function addClaudePersonalAgent(agentName: string): Promise<void> {
+  const paths = getAddPathsWithConfig({
+    agentName,
+    usePersonalClaude: true
+  });
+
+  try {
+    if (!(await Bun.file(paths.sourcePath).exists())) {
+      console.error(`✗ Agent file not found: ${paths.sourcePath}`);
+      process.exit(1);
+    }
+
+    if (await Bun.file(paths.destPath).exists()) {
+      if (!(await promptOverwrite(`${agentName}.md`, 'local pool'))) {
+        console.log('✓ Operation cancelled');
+        return;
+      }
+    }
+
+    await copyFile(paths.sourcePath, paths.destPath);
+    console.log(`✓ Copied ${agentName}.md from ~/.claude/agents/ to local agent pool`);
+
+  } catch (error) {
+    console.error(`✗ Failed to add agent: ${error}`);
+    process.exit(1);
+  }
+}
+
+async function importCommand(source: string, options: { claudeProject?: boolean; claudePersonal?: boolean; force?: boolean }): Promise<void> {
   const parsed = parseImportSource(source);
 
   // Check for README (case insensitive) unless --force is used
@@ -275,11 +362,45 @@ async function importCommand(source: string, options: { claudeProject?: boolean;
     process.exit(1);
   }
 
-  await importLocalAgent(parsed.sourcePath, parsed.filename, options.claudeProject || false);
+  if (options.claudePersonal) {
+    await importToClaudePersonal(parsed.sourcePath, parsed.filename);
+  } else {
+    await importLocalAgent(parsed.sourcePath, parsed.filename, options.claudeProject || false);
+  }
 }
 
 async function importLocalAgent(sourcePath: string, filename: string, toClaudeProject: boolean): Promise<void> {
   const paths = getImportPaths(sourcePath, filename, toClaudeProject);
+
+  try {
+    if (!(await Bun.file(paths.sourcePath).exists())) {
+      console.error(`${paths.sourcePath} not found or inaccessible`);
+      console.log(`✗ Could not copy ${filename}.md file`);
+      return;
+    }
+
+    if (await Bun.file(paths.destPath).exists()) {
+      if (!(await promptOverwrite(`${filename}.md`, paths.destLocation))) {
+        console.log('✓ Operation cancelled');
+        return;
+      }
+    }
+
+    await copyFile(paths.sourcePath, paths.destPath);
+    console.log(`✓ Imported ${filename}.md to ${paths.destLocation}`);
+
+  } catch (error) {
+    console.error(`${paths.sourcePath} not found or inaccessible`);
+    console.log(`✗ Could not copy ${filename}.md file`);
+  }
+}
+
+async function importToClaudePersonal(sourcePath: string, filename: string): Promise<void> {
+  const paths = getImportPathsWithConfig({
+    sourcePath,
+    filename,
+    toClaudePersonal: true
+  });
 
   try {
     if (!(await Bun.file(paths.sourcePath).exists())) {
