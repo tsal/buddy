@@ -1,0 +1,22 @@
+{
+  "name": "buddy",
+  "version": "0.0.1",
+  "module": "src/index.ts",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "description": "A simple CLI tool to manage git-hosted subagents for agentic code assistants.",
+  "private": true,
+  "scripts": {
+    "build": "bun build --compile --outfile=dist/buddy src/index.ts",
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "commander": "14"
+  }
+}
