@@ -17,7 +17,7 @@ Currently supports:
 - stashing - `buddy add -p some-claude-project-subagent` or directly with `buddy add some/path/to/agent-name` (note the lack of .md, it is assumed)
 - cloning - `buddy add https://github.com/some/git-repo.git`
 - re-use - in a project that uses Claude: `buddy import -p git-repo/some/agent-name` and it will add it to your .claude configuration;
-  - you can run with -p to just copy the agent file to the current working directory
+  - you can run without -p to just copy the agent file to the current working directory
   - you can use stashed ones as well - `buddy import -p local/some-claude-project-subagent` for the first example (with claude), `buddy import local/agent-name` for the second (without claude)
 
 ## TODO
