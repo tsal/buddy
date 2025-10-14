@@ -4,7 +4,7 @@ A simple, early-stage project (version 0.0.1) designed as a foundation for futur
 
 ## Usage
 
-To run buddy, currenely use:
+To run buddy, currently use:
 
 ```bash
 bun run src/index.ts
