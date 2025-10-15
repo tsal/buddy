@@ -1,0 +1,5 @@
+{
+  "agents": "lib/agents/definitions",
+  "commands": "lib/commands",
+  "context": "lib/shared/context"
+}

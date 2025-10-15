@@ -1,0 +1,6 @@
+{
+  "agents": "docs",
+  "commands": "scripts",
+  "context": "shared",
+  "extension": "txt"
+}

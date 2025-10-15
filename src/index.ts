@@ -2,8 +2,9 @@
 import { program } from 'commander';
 import { join } from 'path';
 import { homedir } from 'os';
+import { loadBuddyConfigFrom } from './config.js';
 
-const packageJson = await Bun.file(join(import.meta.dir, '../package.json')).json();
+const VERSION = '0.0.1';
 
 // Private Types
 type AddPathConfig = {
@@ -13,7 +14,8 @@ type AddPathConfig = {
 };
 
 type ImportPathConfig = {
-  sourcePath: string;
+  repoName: string;
+  agentPath: string;
   filename: string;
   toClaudeProject?: boolean;
   toClaudePersonal?: boolean;
@@ -21,9 +23,53 @@ type ImportPathConfig = {
 };
 
 // File System Utilities
+async function directoryExists(path: string): Promise<boolean> {
+  try {
+    const result = await Bun.$`test -d ${path}`.nothrow();
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function copyFile(sourcePath: string, targetPath: string): Promise<void> {
   const content = await Bun.file(sourcePath).text();
   await Bun.write(targetPath, content);
+}
+
+async function findAgentFile(basePath: string, agentPath: string, extension?: string): Promise<string | null> {
+  if (extension !== undefined) {
+    // Extension is configured: try .{extension} -> no extension
+    const withExt = `${basePath}/${agentPath}.${extension}`;
+    if (await Bun.file(withExt).exists()) {
+      return withExt;
+    }
+
+    const noExt = `${basePath}/${agentPath}`;
+    if (await Bun.file(noExt).exists()) {
+      return noExt;
+    }
+
+    return null;
+  } else {
+    // No extension configured: try .md -> .txt -> no extension
+    const withMd = `${basePath}/${agentPath}.md`;
+    if (await Bun.file(withMd).exists()) {
+      return withMd;
+    }
+
+    const withTxt = `${basePath}/${agentPath}.txt`;
+    if (await Bun.file(withTxt).exists()) {
+      return withTxt;
+    }
+
+    const noExt = `${basePath}/${agentPath}`;
+    if (await Bun.file(noExt).exists()) {
+      return noExt;
+    }
+
+    return null;
+  }
 }
 
 // User Interaction Utilities
@@ -32,10 +78,13 @@ async function promptOverwrite(filename: string, location: string): Promise<bool
   return response?.toLowerCase() === 'y' || response?.toLowerCase() === 'yes';
 }
 
-function parseImportSource(source: string): { sourcePath: string; filename: string } {
+function parseImportSource(source: string): { repoName: string; agentPath: string; filename: string } {
   // TODO: handle windows
-  const filename = source.split('/').pop() || 'unknown-agent';
-  return { sourcePath: source, filename };
+  const parts = source.split('/');
+  const repoName = parts[0] || 'unknown-repo';
+  const agentPath = parts.slice(1).join('/');
+  const filename = parts[parts.length - 1] || 'unknown-agent';
+  return { repoName, agentPath, filename };
 }
 
 // URL Processing Utilities
@@ -82,7 +131,7 @@ function getBuddyBasePath(customPath?: string): string {
 
 function getAddPaths(agentName: string, basePath?: string) {
   const buddyPath = getBuddyBasePath(basePath);
-  const localAgentsPath = join(buddyPath, 'agents', 'local');
+  const localAgentsPath = join(buddyPath, 'pools', 'local');
   const claudeSourcePath = join(process.cwd(), '.claude', 'agents', `${agentName}.md`);
   const buddyDestPath = join(localAgentsPath, `${agentName}.md`);
 
@@ -93,9 +142,18 @@ function getAddPaths(agentName: string, basePath?: string) {
   };
 }
 
-function getImportPaths(sourcePath: string, filename: string, toClaudeProject: boolean, basePath?: string) {
+async function getImportPaths(repoName: string, agentPath: string, filename: string, toClaudeProject: boolean, basePath?: string) {
   const buddyPath = getBuddyBasePath(basePath);
-  const buddySourcePath = join(buddyPath, 'agents', `${sourcePath}.md`);
+  const repoPath = join(buddyPath, 'pools', repoName);
+
+  // Load the repo's buddy config
+  const repoConfig = await loadBuddyConfigFrom(repoPath);
+
+  // Build base path for agent search
+  const agentBasePath = join(repoPath, repoConfig.agents);
+
+  // Find the agent file with appropriate extension fallback
+  const buddySourcePath = await findAgentFile(agentBasePath, agentPath, repoConfig.extension);
 
   const destPath = toClaudeProject
     ? join(process.cwd(), '.claude', 'agents', `${filename}.md`)
@@ -106,24 +164,26 @@ function getImportPaths(sourcePath: string, filename: string, toClaudeProject: b
   return {
     sourcePath: buddySourcePath,
     destPath,
-    destLocation
+    destLocation,
+    extension: repoConfig.extension,
+    agentsConfigPath: repoConfig.agents
   };
 }
 
 function getRepoPaths(repoName: string, basePath?: string) {
   const buddyPath = getBuddyBasePath(basePath);
-  const agentsPath = join(buddyPath, 'agents');
-  const repoPath = join(agentsPath, repoName);
+  const poolsPath = join(buddyPath, 'pools');
+  const repoPath = join(poolsPath, repoName);
 
   return {
-    agentsPath,
+    poolsPath,
     repoPath
   };
 }
 
 function getAddPathsWithConfig(config: AddPathConfig) {
   const buddyPath = getBuddyBasePath(config.basePath);
-  const localAgentsPath = join(buddyPath, 'agents', 'local');
+  const localAgentsPath = join(buddyPath, 'pools', 'local');
   const claudeSourcePath = config.usePersonalClaude
     ? join(homedir(), '.claude', 'agents', `${config.agentName}.md`)
     : join(process.cwd(), '.claude', 'agents', `${config.agentName}.md`);
@@ -136,9 +196,18 @@ function getAddPathsWithConfig(config: AddPathConfig) {
   };
 }
 
-function getImportPathsWithConfig(config: ImportPathConfig) {
+async function getImportPathsWithConfig(config: ImportPathConfig) {
   const buddyPath = getBuddyBasePath(config.basePath);
-  const buddySourcePath = join(buddyPath, 'agents', `${config.sourcePath}.md`);
+  const repoPath = join(buddyPath, 'pools', config.repoName);
+
+  // Load the repo's buddy config
+  const repoConfig = await loadBuddyConfigFrom(repoPath);
+
+  // Build base path for agent search
+  const agentBasePath = join(repoPath, repoConfig.agents);
+
+  // Find the agent file with appropriate extension fallback
+  const buddySourcePath = await findAgentFile(agentBasePath, config.agentPath, repoConfig.extension);
 
   const destPath = config.toClaudePersonal
     ? join(homedir(), '.claude', 'agents', `${config.filename}.md`)
@@ -146,23 +215,25 @@ function getImportPathsWithConfig(config: ImportPathConfig) {
     ? join(process.cwd(), '.claude', 'agents', `${config.filename}.md`)
     : join(process.cwd(), `${config.filename}.md`);
 
-  const destLocation = config.toClaudePersonal 
-    ? '~/.claude/agents/' 
-    : config.toClaudeProject 
-    ? '.claude/agents/' 
+  const destLocation = config.toClaudePersonal
+    ? '~/.claude/agents/'
+    : config.toClaudeProject
+    ? '.claude/agents/'
     : 'current directory';
 
   return {
     sourcePath: buddySourcePath,
     destPath,
-    destLocation
+    destLocation,
+    extension: repoConfig.extension,
+    agentsConfigPath: repoConfig.agents
   };
 }
 
 program
   .name('buddy')
   .description('Manage git-hosted subagents')
-  .version(packageJson.version || '0.0.1');
+  .version(VERSION);
 
 program
   .command('init')
@@ -174,10 +245,13 @@ program
 
 program
   .command('add')
-  .description('Add agents')
+  .description('Add agents, commands, or shared context')
   .argument('[source]', 'URL, filename, or agent name')
-  .option('-p, --claude-project <name>', 'Copy from .claude/agents/')
-  .option('-c, --claude-personal <name>', 'Copy from ~/.claude/agents/')
+  .option('-j, --claude-project <name>', 'Copy from .claude/agents/')
+  .option('-g, --claude-personal <name>', 'Copy from ~/.claude/agents/')
+  .option('-c, --command <name>', 'Copy command from .claude/commands/')
+  .option('-s, --shared <name>', 'Copy shared context from .claude/shared/')
+  .option('--as <name>', 'Custom name for repository (avoid collisions)')
   .action(async (source: string | undefined, options) => {
     await addCommand(source, options);
   });
@@ -186,36 +260,68 @@ program
   .command('import')
   .description('Import agents')
   .argument('<source>', 'Source in format local/agentname')
-  .option('-p, --claude-project', 'Import to .claude/agents/')
-  .option('-c, --claude-personal', 'Import to ~/.claude/agents/')
+  .option('-j, --claude-project', 'Import to .claude/agents/')
+  .option('-g, --claude-personal', 'Import to ~/.claude/agents/')
   .option('--force', 'Skip README check')
   .action(async (source: string, options) => {
     await importCommand(source, options);
   });
 
+program
+  .command('tool')
+  .description('Output shared context as JSON for tool consumption')
+  .argument('<source>', 'Source in format local/contextname or repo-name/contextname')
+  .action(async (source: string) => {
+    await toolCommand(source);
+  });
+
+program
+  .command('list')
+  .description('List agents, commands, or shared context')
+  .argument('[namespace]', 'Namespace (defaults to "local")')
+  .option('-c, --commands', 'List commands instead of agents')
+  .option('-s, --shared', 'List shared context instead of agents')
+  .action(async (namespace: string | undefined, options) => {
+    await listCommand(namespace || 'local', options);
+  });
+
 async function initCommand(pathname?: string): Promise<void> {
-  const agentsPath = join(getBuddyBasePath(pathname), 'agents', 'local');
-  const initFile = join(agentsPath, '.buddy-initialized');
+  const poolsLocalPath = join(getBuddyBasePath(pathname), 'pools', 'local');
+  const initFile = join(poolsLocalPath, '.buddy-initialized');
+  const commandsPath = join(poolsLocalPath, 'commands');
+  const sharedPath = join(poolsLocalPath, 'shared');
 
   try {
     if (await Bun.file(initFile).exists()) {
-      console.log(`✓ Agent directory already exists at: ${agentsPath}`);
+      console.log(`✓ Pool directory already exists at: ${poolsLocalPath}`);
       return;
     }
 
     await Bun.write(initFile, '');
-    console.log(`✓ Initialized agent pool at: ${agentsPath}`);
+    await Bun.write(join(commandsPath, '.gitkeep'), '');
+    await Bun.write(join(sharedPath, '.gitkeep'), '');
+    console.log(`✓ Initialized pool at: ${poolsLocalPath}`);
 
   } catch (error) {
-    console.error(`✗ Failed to initialize agent pool: ${error}`);
+    console.error(`✗ Failed to initialize pool: ${error}`);
     process.exit(1);
   }
 }
 
-async function addCommand(source: string | undefined, options: { claudeProject?: string; claudePersonal?: string }): Promise<void> {
+async function addCommand(source: string | undefined, options: { claudeProject?: string; claudePersonal?: string; command?: string; shared?: string; as?: string }): Promise<void> {
   // If source is provided and it's a URL, ignore flags and process as URL
   if (source && isUrl(source)) {
-    await addFromUrl(source);
+    await addFromUrl(source, options.as);
+    return;
+  }
+
+  if (options.command) {
+    await addClaudeCommand(options.command);
+    return;
+  }
+
+  if (options.shared) {
+    await addClaudeShared(options.shared);
     return;
   }
 
@@ -236,11 +342,11 @@ async function addCommand(source: string | undefined, options: { claudeProject?:
   }
 
   // If no source or options provided
-  console.error('✗ Please specify a source: URL, filename, or use --claude-project|-p <name>');
+  console.error('✗ Please specify a source: URL, filename, or use --claude-project|-j <name>');
   process.exit(1);
 }
 
-async function addFromUrl(url: string): Promise<void> {
+async function addFromUrl(url: string, customName?: string): Promise<void> {
   const validation = validateUrlProtocol(url);
   if (!validation.isValid) {
     console.error(`✗ ${validation.error}`);
@@ -251,7 +357,7 @@ async function addFromUrl(url: string): Promise<void> {
     const parsed = new URL(url);
 
     if (parsed.protocol === 'https:') {
-      await addFromGitRepo(url);
+      await addFromGitRepo(url, customName);
     } else if (parsed.protocol === 'file:') {
       await addFromLocalFile(url);
     }
@@ -261,21 +367,52 @@ async function addFromUrl(url: string): Promise<void> {
   }
 }
 
-async function addFromGitRepo(url: string): Promise<void> {
-  const repoName = extractRepoName(url);
+async function addFromGitRepo(url: string, customName?: string): Promise<void> {
+  const repoName = customName || extractRepoName(url);
   const paths = getRepoPaths(repoName);
 
   try {
-    // Check if repo already exists
-    if (await Bun.file(paths.repoPath).exists()) {
-      console.log(`Repository ${repoName} already exists, pulling latest changes...`);
-      await Bun.$`git pull`.cwd(paths.repoPath);
+    // Check if directory exists
+    const dirExists = await directoryExists(paths.repoPath);
+
+    if (dirExists) {
+      // Check if it's a valid git repo
+      const gitConfigPath = join(paths.repoPath, '.git', 'config');
+      const isGitRepo = await Bun.file(gitConfigPath).exists();
+
+      if (!isGitRepo) {
+        console.error(`✗ Directory '${repoName}' exists but is not a git repository`);
+        console.log(`   Remove it manually or use --as <name> to choose a different name`);
+        process.exit(1);
+      }
+
+      // Get the existing repo's origin URL
+      const originResult = await Bun.$`git config --get remote.origin.url`.cwd(paths.repoPath).quiet();
+      const existingOrigin = originResult.stdout.toString().trim();
+
+      // Normalize URLs for comparison (remove trailing .git, normalize https/ssh)
+      const normalizeUrl = (u: string) => u.replace(/\.git$/, '').toLowerCase();
+      const sameRepo = normalizeUrl(existingOrigin) === normalizeUrl(url);
+
+      if (sameRepo) {
+        // Same repo, update it
+        console.log(`Repository ${repoName} already exists, pulling latest changes...`);
+        await Bun.$`git pull`.cwd(paths.repoPath);
+      } else {
+        // Different repo, name collision
+        console.error(`✗ Repository name '${repoName}' already exists in pool`);
+        console.error(`   Existing origin: ${existingOrigin}`);
+        console.error(`   Requested URL: ${url}`);
+        console.log(`   Use --as <different-name> to choose a different name`);
+        process.exit(1);
+      }
     } else {
-      console.log(`Cloning repository ${repoName}...`);
+      // Directory doesn't exist, clone it
+      console.log(`Cloning repository as '${repoName}'...`);
       await Bun.$`git clone ${url} ${paths.repoPath}`;
     }
 
-    console.log(`✓ Repository ${repoName} added to agents pool`);
+    console.log(`✓ Repository ${repoName} added to pool`);
   } catch (error) {
     console.error(`✗ Failed to clone repository: ${error}`);
     process.exit(1);
@@ -292,7 +429,7 @@ async function addFromLocalFile(url: string): Promise<void> {
     const targetPath = join(paths.localAgentsPath, filename);
 
     await Bun.write(targetPath, content);
-    console.log(`✓ Copied ${filename} to local agent pool`);
+    console.log(`✓ Copied ${filename} to pool`);
   } catch (error) {
     console.error(`✗ Failed to copy local file: ${error}`);
     process.exit(1);
@@ -309,14 +446,14 @@ async function addClaudeProjectAgent(agentName: string): Promise<void> {
     }
 
     if (await Bun.file(paths.destPath).exists()) {
-      if (!(await promptOverwrite(`${agentName}.md`, 'local pool'))) {
+      if (!(await promptOverwrite(`${agentName}.md`, 'pool'))) {
         console.log('✓ Operation cancelled');
         return;
       }
     }
 
     await copyFile(paths.sourcePath, paths.destPath);
-    console.log(`✓ Copied ${agentName}.md from Claude project to local agent pool`);
+    console.log(`✓ Copied ${agentName}.md from Claude project to pool`);
 
   } catch (error) {
     console.error(`✗ Failed to add agent: ${error}`);
@@ -337,17 +474,73 @@ async function addClaudePersonalAgent(agentName: string): Promise<void> {
     }
 
     if (await Bun.file(paths.destPath).exists()) {
-      if (!(await promptOverwrite(`${agentName}.md`, 'local pool'))) {
+      if (!(await promptOverwrite(`${agentName}.md`, 'pool'))) {
         console.log('✓ Operation cancelled');
         return;
       }
     }
 
     await copyFile(paths.sourcePath, paths.destPath);
-    console.log(`✓ Copied ${agentName}.md from ~/.claude/agents/ to local agent pool`);
+    console.log(`✓ Copied ${agentName}.md from ~/.claude/agents/ to pool`);
 
   } catch (error) {
     console.error(`✗ Failed to add agent: ${error}`);
+    process.exit(1);
+  }
+}
+
+async function addClaudeCommand(commandName: string): Promise<void> {
+  const buddyPath = getBuddyBasePath();
+  const localCommandsPath = join(buddyPath, 'pools', 'local', 'commands');
+  const claudeSourcePath = join(process.cwd(), '.claude', 'commands', `${commandName}.md`);
+  const buddyDestPath = join(localCommandsPath, `${commandName}.md`);
+
+  try {
+    if (!(await Bun.file(claudeSourcePath).exists())) {
+      console.error(`✗ Command file not found: ${claudeSourcePath}`);
+      process.exit(1);
+    }
+
+    if (await Bun.file(buddyDestPath).exists()) {
+      if (!(await promptOverwrite(`${commandName}.md`, 'pool'))) {
+        console.log('✓ Operation cancelled');
+        return;
+      }
+    }
+
+    await copyFile(claudeSourcePath, buddyDestPath);
+    console.log(`✓ Copied ${commandName}.md from Claude project to pool`);
+
+  } catch (error) {
+    console.error(`✗ Failed to add command: ${error}`);
+    process.exit(1);
+  }
+}
+
+async function addClaudeShared(sharedName: string): Promise<void> {
+  const buddyPath = getBuddyBasePath();
+  const localSharedPath = join(buddyPath, 'pools', 'local', 'shared');
+  const claudeSourcePath = join(process.cwd(), '.claude', 'shared', `${sharedName}.md`);
+  const buddyDestPath = join(localSharedPath, `${sharedName}.md`);
+
+  try {
+    if (!(await Bun.file(claudeSourcePath).exists())) {
+      console.error(`✗ Shared context file not found: ${claudeSourcePath}`);
+      process.exit(1);
+    }
+
+    if (await Bun.file(buddyDestPath).exists()) {
+      if (!(await promptOverwrite(`${sharedName}.md`, 'pool'))) {
+        console.log('✓ Operation cancelled');
+        return;
+      }
+    }
+
+    await copyFile(claudeSourcePath, buddyDestPath);
+    console.log(`✓ Copied ${sharedName}.md from Claude project to pool`);
+
+  } catch (error) {
+    console.error(`✗ Failed to add shared context: ${error}`);
     process.exit(1);
   }
 }
@@ -363,22 +556,26 @@ async function importCommand(source: string, options: { claudeProject?: boolean;
   }
 
   if (options.claudePersonal) {
-    await importToClaudePersonal(parsed.sourcePath, parsed.filename);
+    await importToClaudePersonal(parsed.repoName, parsed.agentPath, parsed.filename);
   } else {
-    await importLocalAgent(parsed.sourcePath, parsed.filename, options.claudeProject || false);
+    await importLocalAgent(parsed.repoName, parsed.agentPath, parsed.filename, options.claudeProject || false);
   }
 }
 
-async function importLocalAgent(sourcePath: string, filename: string, toClaudeProject: boolean): Promise<void> {
-  const paths = getImportPaths(sourcePath, filename, toClaudeProject);
+async function importLocalAgent(repoName: string, agentPath: string, filename: string, toClaudeProject: boolean): Promise<void> {
+  const paths = await getImportPaths(repoName, agentPath, filename, toClaudeProject);
+
+  if (!paths.sourcePath) {
+    const fullPath = paths.agentsConfigPath ? join(paths.agentsConfigPath, agentPath) : agentPath;
+    if (paths.extension !== undefined) {
+      console.error(`✗ Agent file not found. Tried: ${fullPath}.${paths.extension}, ${fullPath}`);
+    } else {
+      console.error(`✗ Agent file not found. Tried: ${fullPath}.md, ${fullPath}.txt, ${fullPath}`);
+    }
+    return;
+  }
 
   try {
-    if (!(await Bun.file(paths.sourcePath).exists())) {
-      console.error(`${paths.sourcePath} not found or inaccessible`);
-      console.log(`✗ Could not copy ${filename}.md file`);
-      return;
-    }
-
     if (await Bun.file(paths.destPath).exists()) {
       if (!(await promptOverwrite(`${filename}.md`, paths.destLocation))) {
         console.log('✓ Operation cancelled');
@@ -390,25 +587,29 @@ async function importLocalAgent(sourcePath: string, filename: string, toClaudePr
     console.log(`✓ Imported ${filename}.md to ${paths.destLocation}`);
 
   } catch (error) {
-    console.error(`${paths.sourcePath} not found or inaccessible`);
-    console.log(`✗ Could not copy ${filename}.md file`);
+    console.error(`✗ Failed to copy file: ${error}`);
   }
 }
 
-async function importToClaudePersonal(sourcePath: string, filename: string): Promise<void> {
-  const paths = getImportPathsWithConfig({
-    sourcePath,
+async function importToClaudePersonal(repoName: string, agentPath: string, filename: string): Promise<void> {
+  const paths = await getImportPathsWithConfig({
+    repoName,
+    agentPath,
     filename,
     toClaudePersonal: true
   });
 
-  try {
-    if (!(await Bun.file(paths.sourcePath).exists())) {
-      console.error(`${paths.sourcePath} not found or inaccessible`);
-      console.log(`✗ Could not copy ${filename}.md file`);
-      return;
+  if (!paths.sourcePath) {
+    const fullPath = paths.agentsConfigPath ? join(paths.agentsConfigPath, agentPath) : agentPath;
+    if (paths.extension !== undefined) {
+      console.error(`✗ Agent file not found. Tried: ${fullPath}.${paths.extension}, ${fullPath}`);
+    } else {
+      console.error(`✗ Agent file not found. Tried: ${fullPath}.md, ${fullPath}.txt, ${fullPath}`);
     }
+    return;
+  }
 
+  try {
     if (await Bun.file(paths.destPath).exists()) {
       if (!(await promptOverwrite(`${filename}.md`, paths.destLocation))) {
         console.log('✓ Operation cancelled');
@@ -420,8 +621,138 @@ async function importToClaudePersonal(sourcePath: string, filename: string): Pro
     console.log(`✓ Imported ${filename}.md to ${paths.destLocation}`);
 
   } catch (error) {
-    console.error(`${paths.sourcePath} not found or inaccessible`);
-    console.log(`✗ Could not copy ${filename}.md file`);
+    console.error(`✗ Failed to copy file: ${error}`);
+  }
+}
+
+async function toolCommand(source: string): Promise<void> {
+  const parsed = parseImportSource(source);
+
+  try {
+    let contextPath: string;
+    let config;
+
+    if (parsed.repoName === 'local') {
+      // Local shared context
+      const buddyPath = getBuddyBasePath();
+      contextPath = join(buddyPath, 'pools', 'local', 'shared');
+      config = { extension: undefined };
+    } else {
+      // Repo shared context
+      const buddyPath = getBuddyBasePath();
+      const repoPath = join(buddyPath, 'pools', parsed.repoName);
+
+      // Load the repo's buddy config
+      config = await loadBuddyConfigFrom(repoPath);
+      contextPath = join(repoPath, config.context);
+    }
+
+    // Find the context file with extension fallback
+    const filePath = await findAgentFile(contextPath, parsed.agentPath, config.extension);
+
+    if (!filePath) {
+      const fullPath = parsed.agentPath;
+      if (config.extension !== undefined) {
+        console.error(JSON.stringify({
+          error: `Context file not found. Tried: ${fullPath}.${config.extension}, ${fullPath}`
+        }));
+      } else {
+        console.error(JSON.stringify({
+          error: `Context file not found. Tried: ${fullPath}.md, ${fullPath}.txt, ${fullPath}`
+        }));
+      }
+      process.exit(1);
+    }
+
+    // Read the file content
+    const content = await Bun.file(filePath).text();
+
+    // Output as JSON
+    console.log(JSON.stringify({
+      content: content
+    }));
+
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: `Failed to read context file: ${error}`
+    }));
+    process.exit(1);
+  }
+}
+
+async function listCommand(namespace: string, options: { commands?: boolean; shared?: boolean }): Promise<void> {
+  const buddyPath = getBuddyBasePath();
+
+  try {
+    let listPath: string;
+    let type: string;
+
+    if (namespace === 'local') {
+      // Local pool
+      const basePath = join(buddyPath, 'pools', 'local');
+
+      if (options.commands) {
+        listPath = join(basePath, 'commands');
+        type = 'commands';
+      } else if (options.shared) {
+        listPath = join(basePath, 'shared');
+        type = 'shared context';
+      } else {
+        listPath = basePath;
+        type = 'agents';
+      }
+    } else {
+      // Repo pool
+      const repoPath = join(buddyPath, 'pools', namespace);
+
+      // Check if repo exists
+      if (!await directoryExists(repoPath)) {
+        console.error(`✗ Pool '${namespace}' not found`);
+        process.exit(1);
+      }
+
+      // Load the repo's config
+      const config = await loadBuddyConfigFrom(repoPath);
+
+      if (options.commands) {
+        listPath = join(repoPath, config.commands);
+        type = 'commands';
+      } else if (options.shared) {
+        listPath = join(repoPath, config.context);
+        type = 'shared context';
+      } else {
+        listPath = join(repoPath, config.agents);
+        type = 'agents';
+      }
+    }
+
+    // Check if directory exists
+    if (!await directoryExists(listPath)) {
+      console.log(`No ${type} found in ${namespace}`);
+      return;
+    }
+
+    // List files
+    const result = await Bun.$`find ${listPath} -type f \( -name "*.md" -o -name "*.txt" \)`.nothrow();
+
+    if (result.exitCode !== 0 || !result.stdout.toString().trim()) {
+      console.log(`No ${type} found in ${namespace}`);
+      return;
+    }
+
+    const files = result.stdout.toString().trim().split('\n');
+    const items = files.map(file => {
+      // Get relative path from listPath
+      const relativePath = file.replace(listPath + '/', '').replace(/\.(md|txt)$/, '');
+      return relativePath;
+    }).filter(Boolean).sort();
+
+    console.log(`${type} in ${namespace}:`);
+    items.forEach(item => console.log(`  ${item}`));
+
+  } catch (error) {
+    console.error(`✗ Failed to list ${namespace}: ${error}`);
+    process.exit(1);
   }
 }
 

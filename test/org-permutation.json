@@ -1,0 +1,6 @@
+{
+  "agents": "prompts/agents",
+  "commands": "prompts/commands",
+  "context": "prompts/shared",
+  "extension": "org"
+}

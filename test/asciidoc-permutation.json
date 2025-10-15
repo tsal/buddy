@@ -1,0 +1,6 @@
+{
+  "agents": "agents",
+  "commands": "commands",
+  "context": "shared",
+  "extension": "adoc"
+}
