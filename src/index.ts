@@ -25,9 +25,13 @@ type ImportPathConfig = {
 // File System Utilities
 async function directoryExists(path: string): Promise<boolean> {
   try {
-    const result = await Bun.$`test -d ${path}`.nothrow();
-    return result.exitCode === 0;
-  } catch {
+    // Attempt to glob for all entries within the directory.
+    // This will throw an error if 'path' is not a directory or does not exist.
+    const glob = new Bun.Glob("*");
+    await Array.fromAsync(glob.scan({ cwd: path }));
+    return true; // If no error, it's a directory
+  } catch (error) {
+    // Any error here suggests it's not a valid, accessible directory.
     return false;
   }
 }
@@ -732,20 +736,23 @@ async function listCommand(namespace: string, options: { commands?: boolean; sha
       return;
     }
 
-    // List files
-    const result = await Bun.$`find ${listPath} -type f \( -name "*.md" -o -name "*.txt" \)`.nothrow();
+    // List files using Bun.Glob
+    const mdGlob = new Bun.Glob(`**/*.md`);
+    const txtGlob = new Bun.Glob(`**/*.txt`);
 
-    if (result.exitCode !== 0 || !result.stdout.toString().trim()) {
+    const mdFiles = Array.from(mdGlob.scanSync({ cwd: listPath, onlyFiles: true }));
+    const txtFiles = Array.from(txtGlob.scanSync({ cwd: listPath, onlyFiles: true }));
+    const allFiles = [...mdFiles, ...txtFiles];
+
+    if (allFiles.length === 0) {
       console.log(`No ${type} found in ${namespace}`);
       return;
     }
 
-    const files = result.stdout.toString().trim().split('\n');
-    const items = files.map(file => {
-      // Get relative path from listPath
-      const relativePath = file.replace(listPath + '/', '').replace(/\.(md|txt)$/, '');
-      return relativePath;
-    }).filter(Boolean).sort();
+    const items = allFiles.map(file => {
+      // Remove extension
+      return file.replace(/\.(md|txt)$/, '');
+    }).sort();
 
     console.log(`${type} in ${namespace}:`);
     items.forEach(item => console.log(`  ${item}`));
