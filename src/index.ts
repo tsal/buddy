@@ -752,6 +752,12 @@ async function listCommand(namespace: string, options: { commands?: boolean; sha
     const items = allFiles.map(file => {
       // Remove extension
       return file.replace(/\.(md|txt)$/, '');
+    }).filter(item => {
+      // Filter out README files when listing agents
+      if (type === 'agents' && item.toLowerCase() === 'readme') {
+        return false;
+      }
+      return true;
     }).sort();
 
     console.log(`${type} in ${namespace}:`);
